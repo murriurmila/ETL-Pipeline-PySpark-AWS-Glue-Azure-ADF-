@@ -1,44 +1,22 @@
-# Databricks Notebook: Real-Time Sales ETL Pipeline
-# Author: Urmila Murri
-
-
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, year, month, sum as _sum
-from pyspark.sql.types import DoubleType, DateType
+from pyspark.sql.functions import col, to_date
 
-# Initialize Spark
-spark = SparkSession.builder.appName("SalesETLPipeline").getOrCreate()
+# Initialize Spark session
+spark = SparkSession.builder.appName("ETL_Pipeline").getOrCreate()
 
-# 1. Ingest Raw CSV
-raw_df = spark.read.option("header", "true").csv("/FileStore/tables/sales_data.csv")
+# Bronze Layer - raw data
+bronze_df = spark.read.csv("SampleSuperstore.csv", header=True, inferSchema=True)
+bronze_df.write.mode("overwrite").parquet("bronze_layer/sales_data.parquet")
 
-# 2. Clean & Transform
-cleaned_df = (raw_df
-    .withColumn("Order Date", to_date(col("Order Date"), "MM/dd/yyyy"))
-    .withColumn("Sales", col("Sales").cast(DoubleType()))
-    .withColumn("Profit", col("Profit").cast(DoubleType()))
-    .dropna(subset=["Order ID", "Sales"])
-    .dropDuplicates(["Order ID"])
-    .filter(col("Order Date").isNotNull())
-)
+# Silver Layer - cleaned
+silver_df = bronze_df.dropna()
+silver_df = silver_df.withColumn("OrderDate", to_date(col("Order Date"), 'MM/dd/yyyy'))
+silver_df.write.mode("overwrite").parquet("silver_layer/sales_data.parquet")
 
-# 3. Monthly Aggregations
-monthly_sales = (cleaned_df
-    .groupBy(year("Order Date").alias("Year"), month("Order Date").alias("Month"))
-    .agg(
-        _sum("Sales").alias("Total_Sales"),
-        _sum("Profit").alias("Total_Profit")
-    )
-    .orderBy("Year", "Month")
-)
+# Gold Layer - aggregated KPIs
+gold_df = silver_df.groupBy("Region", "Category").sum("Sales", "Profit")
+gold_df.write.mode("overwrite").parquet("gold_layer/kpi_data.parquet")
 
-# 4. Save to Delta Lake
-cleaned_df.write.format("delta").mode("overwrite").save("/delta/sales_cleaned")
-monthly_sales.write.format("delta").mode("overwrite").save("/delta/monthly_summary")
+# Show Gold layer
+gold_df.show()
 
-# 5. Register Tables
-spark.sql("CREATE TABLE IF NOT EXISTS sales_cleaned USING DELTA LOCATION '/delta/sales_cleaned'")
-spark.sql("CREATE TABLE IF NOT EXISTS monthly_summary USING DELTA LOCATION '/delta/monthly_summary'")
-
-print("ETL Pipeline Completed & Delta Tables Created!")
-display(monthly_sales)
